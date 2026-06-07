@@ -1,0 +1,18 @@
+export const contactCls = "contracts_Contactbook";
+export const templateCls = "contracts_Template";
+export const documentCls = "contracts_Document";
+// Brand primary color. Runtime-configurable per deployment via the
+// BRAND_COLOR env var (see entrypoint.sh); falls back to Pluvo blue.
+export const themeColor =
+  (window?.RUNTIME_ENV?.BRAND_COLOR || "").trim() || "#3E8FCB";
+export const iconColor = "#686968";
+// Dynamic icon color function for better dark mode visibility
+export const getThemeIconColor = () => {
+  const theme = document.documentElement.getAttribute("data-theme");
+  return theme === "opensigndark" ? "#CCCCCC" : "#686968";
+};
+export const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+export const maxTitleLength = 250; // 250 characters
+export const maxNoteLength = 200; // 200 characters
+export const maxDescriptionLength = 500; // 500 characters
+export const maxFileSize = 80; // for cloud 10MB / 80MB for self-hosted

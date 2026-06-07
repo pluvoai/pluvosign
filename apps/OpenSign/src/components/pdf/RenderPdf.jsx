@@ -1,0 +1,741 @@
+import React, {
+  useState,
+  useRef,
+  useCallback,
+  useLayoutEffect,
+  useEffect
+} from "react";
+import RSC from "react-scrollbars-custom";
+import { Document, Page } from "react-pdf";
+import {
+  defaultWidthHeight,
+  getContainerScale,
+  handleImageResize,
+  handleSignYourselfImageResize,
+  isMobile,
+  textInputWidget,
+  textWidget
+} from "../../constant/Utils";
+import Placeholder from "./Placeholder";
+import Alert from "../../primitives/Alert";
+import { useTranslation } from "react-i18next";
+import usePdfPinchZoom from "../../hook/usePdfPinchZoom";
+import { useDispatch, useSelector } from "react-redux";
+import Guidelines from "./Guidelines";
+import { useGuidelinesContext } from "../../context/GuidelinesContext";
+import { toggleSidebar } from "../../redux/reducers/sidebarReducer";
+import DragGuidelinesLayer from "./DragGridLinesLayer";
+import { useDrop } from "react-dnd";
+import WidgetsDragPreview from "./WidgetsDragPreview";
+
+function RenderPdf(props) {
+  const { t } = useTranslation();
+  const dispatch = useDispatch();
+  const { guideline, showGuidelines } = useGuidelinesContext();
+  const [, drop] = useDrop({
+    accept: "BOX",
+    drop: (item, monitor) => {
+      props?.addPositionOfSignature(item, monitor);
+      showGuidelines(false);
+    }
+  });
+  const [scaledHeight, setScaledHeight] = useState();
+  //check isGuestSigner is present in local if yes than handle login flow header in mobile view
+  const isGuestSigner = localStorage.getItem("isGuestSigner");
+  const scrollTriggerId = useSelector((state) => state.widget.scrollTriggerId);
+  const isOpen = useSelector((state) => state.sidebar.isOpen);
+  const scrollRef = useRef(null);
+  const pdfContainerRef = useRef(null);
+
+  // Refs for drawing Text Input widget — avoids re-rendering the full tree on
+  // every pointermove event. Only isDrawing (a boolean) is kept in React state
+  // so that the overlay div is mounted/unmounted; coordinates are stored in
+  // refs and the overlay style is updated imperatively via drawingOverlayRef.
+  const [isDrawing, setIsDrawing] = useState(false);
+  const isDrawingRef = useRef(false);
+  const drawStartRef = useRef(null);
+  const drawEndRef = useRef(null);
+  const drawingOverlayRef = useRef(null);
+  // Ref flag to suppress the click event that fires after pointerup when a
+  // widget was just drawn, preventing the Document onClick from deselecting it.
+  const justDrewRef = useRef(false);
+
+  useEffect(() => {
+    dispatch(toggleSidebar(false));
+    return () => {
+      dispatch(toggleSidebar(true));
+    };
+  }, []);
+
+  // enable pinch to zoom only on actual pdf wrapper
+  usePdfPinchZoom(
+    pdfContainerRef,
+    props.scale,
+    props.setScale,
+    props.setZoomPercent
+  );
+
+  // handle signature block width and height according to screen
+  const posWidth = (pos, signYourself) => {
+    const containerScale = getContainerScale(
+      props.pdfOriginalWH,
+      props.pageNumber,
+      props.containerWH
+    );
+    const defaultWidth = defaultWidthHeight(pos.type).width;
+    const posWidth = pos.Width ? pos.Width : defaultWidth;
+    if (signYourself) {
+      return posWidth * props.scale * containerScale;
+    } else {
+      if (pos.isMobile && pos.scale) {
+        if (pos.IsResize) {
+          if (props.scale > 1) {
+            return posWidth * pos.scale * containerScale * props.scale;
+          } else {
+            return posWidth * containerScale;
+          }
+        } else {
+          if (props.scale > 1) {
+            return posWidth * pos.scale * containerScale * props.scale;
+          } else {
+            return posWidth * pos.scale * containerScale;
+          }
+        }
+      } else {
+        return posWidth * props.scale * containerScale;
+      }
+    }
+  };
+  const posHeight = (pos, signYourself) => {
+    const containerScale = getContainerScale(
+      props.pdfOriginalWH,
+      props.pageNumber,
+      props.containerWH
+    );
+    const posHeight = pos.Height || defaultWidthHeight(pos.type).height;
+    if (signYourself) {
+      return posHeight * props.scale * containerScale;
+    } else {
+      if (pos.isMobile && pos.scale) {
+        if (pos.IsResize) {
+          if (props.scale > 1) {
+            return posHeight * pos.scale * containerScale * props.scale;
+          } else {
+            return posHeight * containerScale;
+          }
+        } else {
+          if (props.scale > 1) {
+            return posHeight * pos.scale * containerScale * props.scale;
+          } else {
+            return posHeight * pos.scale * containerScale;
+          }
+        }
+      } else {
+        return posHeight * props.scale * containerScale;
+      }
+    }
+  };
+
+  // `smoothScrollTo` is used to provide smooth scrolling while focus on widget
+  const smoothScrollTo = (targetY, duration = 500) => {
+    const sb = scrollRef.current;
+    if (!sb) return;
+    const start = sb.scrollTop;
+    const change = targetY - start;
+    const startTime = performance.now();
+
+    const animate = (now) => {
+      const elapsed = now - startTime;
+      const t = Math.min(1, elapsed / duration);
+      // easeInOutQuad
+      const ease = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
+      sb.scrollTo(sb.scrollLeft, start + change * ease);
+      if (t < 1) requestAnimationFrame(animate);
+    };
+
+    requestAnimationFrame(animate);
+  };
+
+  // `scrollToTarget` is used to focus on widget and scroll to top
+  const scrollToTarget = useCallback(() => {
+    // Get the scrollbar container ref
+    const sb = scrollRef.current;
+    // If there's no content element or no widget details, bail out
+    if (!sb?.contentElement || !props.currWidgetsDetails) return;
+
+    // The absolute Y position (relative to the document) where we want to scroll
+    const yPosition = props?.currWidgetsDetails?.yPosition || 0;
+    const containerScale = getContainerScale(
+      props.pdfOriginalWH,
+      props.pageNumber,
+      props.containerWH
+    );
+
+    const targetTop = yPosition * containerScale * props.scale;
+    // The Y offset of the scrollable content container itself
+    const { offsetTop } = sb.contentElement;
+
+    // Account for the header height + a little extra padding
+    // Different header height if user is a guest signer
+    const headerOffset = isGuestSigner ? 10 : 79;
+    // Compute the scroll position inside the container
+    const positionTop = targetTop - offsetTop - headerOffset;
+
+    const pageNumber = props.pageNumber > 0 ? props.pageNumber - 1 : 0;
+    const ogH = props.pdfOriginalWH[pageNumber]?.height;
+    // If the modal for this widget is open, we may need to expand the PDF container
+    if (props.isShowModal[scrollTriggerId]) {
+      // Original PDF height for this page
+      if (pdfContainerRef?.current) {
+        // Increase container height to include the area up to the target
+        pdfContainerRef.current.style.height = `${ogH + (targetTop - offsetTop)}px`;
+      }
+    } else {
+      // Otherwise, reset any inline height override
+      if (pdfContainerRef?.current) {
+        pdfContainerRef.current.style.height = "";
+      }
+    }
+    // Actually perform the scroll: keep the same horizontal scroll, scroll vertically
+    if (targetTop > ogH * 0.75 && !isGuestSigner && isOpen) {
+      smoothScrollTo(positionTop - 300);
+    } else if (targetTop > ogH * 0.75 && !isGuestSigner && !isOpen) {
+      smoothScrollTo(positionTop - 100);
+    } else {
+      smoothScrollTo(positionTop);
+    }
+
+    // Highlight only the target widget; reset others to default border
+    document.querySelectorAll(".signYourselfBlock").forEach((w) => {
+      w.style.border =
+        w.id === String(scrollTriggerId)
+          ? "1.5px solid red" // active widget in red
+          : "1.5px solid #007bff"; // others in blue
+    });
+  }, [
+    scrollTriggerId,
+    props.currWidgetsDetails?.yPosition,
+    props.isShowModal,
+    props.pdfOriginalWH,
+    props.pageNumber
+  ]);
+
+  useLayoutEffect(() => {
+    // Whenever scrollTriggerId changes, fire off the scroll in the next rAF
+    // to ensure the DOM has painted/layout is stable before scrolling
+    if (scrollTriggerId) {
+      scrollToTarget();
+    }
+  }, [scrollTriggerId, scrollToTarget]);
+
+  // function for render placeholder block over pdf document (all signing flow)
+  const checkSignedSigners = (data) => {
+    let checkSign = [];
+    //condition to handle quick send flow and using normal request sign flow
+    checkSign = props.signedSigners
+      ? props.signedSigners?.filter(
+          (sign) =>
+            sign?.Id === data?.Id || sign?.objectId === data?.signerObjId
+        )
+      : [];
+    return (
+      checkSign.length === 0 &&
+      data?.placeHolder?.map((placeData, key) => (
+        <React.Fragment key={key}>
+          {placeData.pageNumber === props.pageNumber &&
+            placeData.pos.map(
+              (pos, ind) =>
+                pos && (
+                  <React.Fragment key={ind}>
+                    <Placeholder
+                      pos={pos}
+                      handleSignYourselfImageResize={handleImageResize}
+                      index={props.pageNumber}
+                      xyPosition={props.signerPos}
+                      setXyPosition={props.setSignerPos}
+                      data={data}
+                      setIsResize={props.setIsResize}
+                      isShowBorder={props.isSelfSign}
+                      isAlllowModify={props.isAlllowModify}
+                      signerObjId={props.signerObjectId}
+                      isShowDropdown={true}
+                      isNeedSign={props.pdfRequest}
+                      isSelfSign={true}
+                      isSignYourself={false}
+                      posWidth={posWidth}
+                      posHeight={posHeight}
+                      isDragging={props.isDragging}
+                      pdfDetails={props.pdfDetails}
+                      unSignedWidgetId={props.unSignedWidgetId}
+                      setCurrWidgetsDetails={props.setCurrWidgetsDetails}
+                      uniqueId={props.uniqueId}
+                      scale={props.scale}
+                      containerWH={props.containerWH}
+                      pdfOriginalWH={props.pdfOriginalWH}
+                      pageNumber={props.pageNumber}
+                      ispublicTemplate={props.ispublicTemplate}
+                      handleUserDetails={props.handleUserDetails}
+                      isResize={props.isResize}
+                      handleTabDrag={props.handleTabDrag}
+                      handleStop={props.handleStop}
+                      setUniqueId={props.setUniqueId}
+                      setIsSelectId={props.setIsSelectId}
+                      handleDeleteWidget={props.handleDeleteWidget}
+                      setIsPageCopy={props.setIsPageCopy}
+                      handleTextSettingModal={props.handleTextSettingModal}
+                      handleCellSettingModal={props.handleCellSettingModal}
+                      setIsCheckbox={props.setIsCheckbox}
+                      isFreeResize={props.isSelfSign ? true : false}
+                      isOpenSignPad={true}
+                      assignedWidgetId={props.assignedWidgetId}
+                      setCellCount={props.setCellCount}
+                      setFontSize={props.setFontSize}
+                      fontSize={props.fontSize}
+                      fontColor={props.fontColor}
+                      setFontColor={props.setFontColor}
+                      setIsReqSignTourDisabled={props.setIsReqSignTourDisabled}
+                      calculateFontsize={calculateFontsize}
+                      currWidgetsDetails={props?.currWidgetsDetails}
+                      handleNameModal={props?.handleNameModal}
+                    />
+                  </React.Fragment>
+                )
+            )}
+        </React.Fragment>
+      ))
+    );
+  };
+
+  const calculateFontsize = (pos) => {
+    const width = posWidth(pos);
+    const height = posHeight(pos);
+
+    if (height === width || height < width) {
+      return `${height / 5}px`;
+    } else if (width < height) {
+      return `${width / 10}px`;
+    }
+  };
+  const pdfDataBase64 = `data:application/pdf;base64,${props.pdfBase64Url}`;
+  // calculate render height of pdf in mobile view
+  const handlePageLoadSuccess = (page) => {
+    if (isMobile) {
+      const containerWidth = props.divRef.current.offsetWidth; // Get container width
+      const viewport = page.getViewport({ scale: 1 });
+      const scale = containerWidth / viewport.width; // Scale to fit container width
+      const scaleHeight = viewport.height * scale;
+      setScaledHeight(scaleHeight);
+    }
+  };
+
+  // Handle drawing Text Input widget on PDF
+  const handlePointerDown = (e) => {
+    // Only allow drawing in placeholder mode when no widget is selected
+    if (
+      !props.placeholder ||
+      props.currWidgetsDetails?.key ||
+      props.isDragging
+    ) {
+      return;
+    }
+
+    // Disable drawing on mobile/touch devices to avoid conflicts with pinch-to-zoom
+    if (isMobile || e.pointerType !== "mouse") {
+      return;
+    }
+
+    // Don't draw if clicking on an existing widget
+    if (e.target.closest(".signYourselfBlock")) {
+      return;
+    }
+
+    const rect = pdfContainerRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    isDrawingRef.current = true;
+    drawStartRef.current = { x, y };
+    drawEndRef.current = { x, y };
+    setIsDrawing(true); // single setState to mount the overlay div
+  };
+
+  const handlePointerMove = (e) => {
+    if (!isDrawingRef.current || !drawStartRef.current) {
+      return;
+    }
+
+    const rect = pdfContainerRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    drawEndRef.current = { x, y };
+
+    // Update the overlay position directly via DOM — no setState, no re-render
+    if (drawingOverlayRef.current) {
+      const width = Math.abs(x - drawStartRef.current.x);
+      const height = Math.abs(y - drawStartRef.current.y);
+      const rectX = Math.min(drawStartRef.current.x, x);
+      const rectY = Math.min(drawStartRef.current.y, y);
+      const s = drawingOverlayRef.current.style;
+      s.left = `${rectX}px`;
+      s.top = `${rectY}px`;
+      s.width = `${width}px`;
+      s.height = `${height}px`;
+    }
+  };
+
+  const handlePointerUp = (e) => {
+    if (!isDrawingRef.current || !drawStartRef.current || !drawEndRef.current) {
+      isDrawingRef.current = false;
+      drawStartRef.current = null;
+      drawEndRef.current = null;
+      setIsDrawing(false);
+      return;
+    }
+
+    const width = Math.abs(drawEndRef.current.x - drawStartRef.current.x);
+    const height = Math.abs(drawEndRef.current.y - drawStartRef.current.y);
+    
+    // Only create widget if the drawn area is large enough (minimum 30x20 pixels)
+    if (width > 30 && height > 20) {
+      const containerScale = getContainerScale(
+        props.pdfOriginalWH,
+        props.pageNumber,
+        props.containerWH
+      );
+
+      const rectX = Math.min(drawStartRef.current.x, drawEndRef.current.x);
+      const rectY = Math.min(drawStartRef.current.y, drawEndRef.current.y);
+
+      // Convert pixel coordinates to PDF coordinates
+      const xPosition = rectX / (containerScale * props.scale);
+      const yPosition = rectY / (containerScale * props.scale);
+      const widgetWidth = width / (containerScale * props.scale);
+      const widgetHeight = height / (containerScale * props.scale);
+
+      // Create a Text Input widget at the drawn position
+      if (props.addPositionOfSignature) {
+        // Simulate dropping a text input widget
+        const type =
+          props?.roleName === "prefill" ? textWidget : textInputWidget;
+        const textInputItem = { text: type, type: "BOX" };
+
+        const monitor = {
+          type: type,
+          getClientOffset: () => ({ x: rectX, y: rectY }),
+          getSourceClientOffset: () => ({ x: rectX, y: rectY })
+        };
+
+        props.addPositionOfSignature(textInputItem, monitor, {
+          customPosition: {
+            xPosition,
+            yPosition,
+            width: widgetWidth,
+            height: widgetHeight
+          }
+        });
+        // Mark that a widget was just drawn so the subsequent click event
+        // does not deselect it via the Document onClick handler.
+        justDrewRef.current = true;
+      }
+    }
+
+    // Reset drawing state
+    isDrawingRef.current = false;
+    drawStartRef.current = null;
+    drawEndRef.current = null;
+    setIsDrawing(false); // single setState to unmount the overlay div
+  };
+  return (
+    <>
+      {props.successEmail && (
+        <Alert type={"success"}>{t("success-email-alert")}</Alert>
+      )}
+      <RSC
+        ref={scrollRef}
+        style={{
+          position: "relative",
+          boxShadow: "rgba(17, 12, 46, 0.15) 0px 48px 100px 0px",
+          height: isMobile
+            ? isGuestSigner
+              ? window.innerHeight - 49 // 49 is height of header
+              : scaledHeight
+            : `${window.innerHeight}px`,
+          zIndex: 0
+        }}
+        noScrollY={isMobile ? props.scale === 1 : false}
+        noScrollX={props.scale === 1}
+      >
+        <div
+          data-tut={isMobile ? "reactourForth" : undefined}
+          className={
+            isMobile
+              ? `${isGuestSigner ? "30px" : ""} border-[0.1px] border-[#ebe8e8] overflow-x-auto relative`
+              : "relative"
+          }
+          style={{
+            width:
+              props.containerWH?.width &&
+              props.containerWH?.width * props.scale,
+            cursor:
+              props.placeholder &&
+              !props.currWidgetsDetails?.key &&
+              !props.isDragging
+                ? "crosshair"
+                : "default"
+          }}
+          ref={(node) => {
+            pdfContainerRef.current = node;
+            drop && drop(node);
+          }}
+          id="container"
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerLeave={() => {
+            if (isDrawing) {
+              handlePointerUp();
+            }
+          }}
+        >
+          {props.pdfLoad !== false &&
+            props.containerWH?.width &&
+            props.pdfOriginalWH.length > 0 && (
+              <>
+                {props.pdfRequest || props.isSelfSign
+                  ? // request sign, guest sign,
+                    props.signerPos?.map((data, key) => (
+                      <React.Fragment key={key}>
+                        {checkSignedSigners(data)}
+                      </React.Fragment>
+                    ))
+                  : props.placeholder // placeholdersign document, draft document, create template, draft template
+                    ? props.signerPos?.map((data, ind) => (
+                        <React.Fragment key={ind}>
+                          {data?.placeHolder &&
+                            data?.placeHolder.map((placeData, index) => (
+                              <React.Fragment key={index}>
+                                {placeData.pageNumber === props.pageNumber &&
+                                  placeData.pos.map((pos) => (
+                                    <React.Fragment key={pos.key}>
+                                      <Placeholder
+                                        pos={pos}
+                                        setIsPageCopy={props.setIsPageCopy}
+                                        handleDeleteWidget={
+                                          props.handleDeleteWidget
+                                        }
+                                        handleTabDrag={props.handleTabDrag}
+                                        handleStop={props.handleStop}
+                                        handleSignYourselfImageResize={
+                                          handleImageResize
+                                        }
+                                        index={props.pageNumber}
+                                        xyPosition={props.signerPos}
+                                        setXyPosition={props.setSignerPos}
+                                        data={data}
+                                        setIsResize={props.setIsResize}
+                                        setShowDropdown={props.setShowDropdown}
+                                        isShowBorder={true}
+                                        isPlaceholder={true}
+                                        setUniqueId={props.setUniqueId}
+                                        handleLinkUser={props.handleLinkUser}
+                                        isSignYourself={false}
+                                        posWidth={posWidth}
+                                        posHeight={posHeight}
+                                        isDragging={props.isDragging}
+                                        setIsValidate={props.setIsValidate}
+                                        setIsRadio={props.setIsRadio}
+                                        setIsCheckbox={props.setIsCheckbox}
+                                        setCurrWidgetsDetails={
+                                          props.setCurrWidgetsDetails
+                                        }
+                                        handleNameModal={props.handleNameModal}
+                                        uniqueId={props.uniqueId}
+                                        handleTextSettingModal={
+                                          props.handleTextSettingModal
+                                        }
+                                        handleCellSettingModal={
+                                          props.handleCellSettingModal
+                                        }
+                                        scale={props.scale}
+                                        containerWH={props.containerWH}
+                                        pdfOriginalWH={props.pdfOriginalWH}
+                                        pageNumber={props.pageNumber}
+                                        setIsSelectId={props.setIsSelectId}
+                                        fontSize={props.fontSize}
+                                        setFontSize={props.setFontSize}
+                                        setCellCount={props.setCellCount}
+                                        fontColor={props.fontColor}
+                                        setFontColor={props.setFontColor}
+                                        isResize={props.isResize}
+                                        unSignedWidgetId={
+                                          props.unSignedWidgetId
+                                        }
+                                        isFreeResize={true}
+                                        calculateFontsize={calculateFontsize}
+                                        currWidgetsDetails={
+                                          props?.currWidgetsDetails
+                                        }
+                                        setRoleName={props?.setRoleName}
+                                        pdfDetails={props.pdfDetails}
+                                        setIsReqSignTourDisabled={
+                                          props.setIsReqSignTourDisabled
+                                        }
+                                      />
+                                    </React.Fragment>
+                                  ))}
+                              </React.Fragment>
+                            ))}
+                        </React.Fragment>
+                      ))
+                    : !props.pdfDetails?.[0]?.IsCompleted && // signyourself flow
+                      props.xyPosition?.map((data, ind) => (
+                        <React.Fragment key={ind}>
+                          {data.pageNumber === props.pageNumber &&
+                            data.pos.map(
+                              (pos, id) =>
+                                pos && (
+                                  <Placeholder
+                                    key={id}
+                                    pos={pos}
+                                    setIsPageCopy={props.setIsPageCopy}
+                                    handleDeleteWidget={
+                                      props.handleDeleteWidget
+                                    }
+                                    handleTabDrag={props.handleTabDrag}
+                                    handleStop={props.handleStop}
+                                    handleSignYourselfImageResize={
+                                      handleSignYourselfImageResize
+                                    }
+                                    index={props.index}
+                                    xyPosition={props.xyPosition}
+                                    setXyPosition={props.setXyPosition}
+                                    containerWH={props.containerWH}
+                                    isShowBorder={true}
+                                    isSignYourself={true}
+                                    posWidth={posWidth}
+                                    posHeight={posHeight}
+                                    isDragging={props.isDragging}
+                                    setIsCheckbox={props.setIsCheckbox}
+                                    setCurrWidgetsDetails={
+                                      props.setCurrWidgetsDetails
+                                    }
+                                    handleTextSettingModal={
+                                      props.handleTextSettingModal
+                                    }
+                                    handleCellSettingModal={
+                                      props.handleCellSettingModal
+                                    }
+                                    scale={props.scale}
+                                    pdfOriginalWH={props.pdfOriginalWH}
+                                    pageNumber={props.pageNumber}
+                                    fontSize={props.fontSize}
+                                    setFontSize={props.setFontSize}
+                                    fontColor={props.fontColor}
+                                    setFontColor={props.setFontColor}
+                                    isResize={props.isResize}
+                                    setIsResize={props.setIsResize}
+                                    isFreeResize={true}
+                                    isOpenSignPad={true}
+                                    calculateFontsize={calculateFontsize}
+                                    currWidgetsDetails={
+                                      props?.currWidgetsDetails
+                                    }
+                                    setIsReqSignTourDisabled={
+                                      props.setIsReqSignTourDisabled
+                                    }
+                                    unSignedWidgetId={props.unSignedWidgetId}
+                                    handleNameModal={props.handleNameModal}
+                                  />
+                                )
+                            )}
+                        </React.Fragment>
+                      ))}
+              </>
+            )}
+          <Document
+            error={<p className="mx-2">{t("failed-to-load-refresh-page")}</p>}
+            onLoadError={(e) => {
+              console.log("PDF load error", e);
+              props.setPdfLoad(false);
+            }}
+            loading={t("loading-doc")}
+            onLoadSuccess={(pdf) => {
+              props.setPdfLoad(true);
+              props.pageDetails(pdf);
+            }}
+            onClick={() => {
+              if (justDrewRef.current) {
+                justDrewRef.current = false;
+                return;
+              }
+              props.setCurrWidgetsDetails && props.setCurrWidgetsDetails({});
+              showGuidelines(false);
+            }}
+            file={pdfDataBase64}
+          >
+            <Page
+              key={props.index}
+              onLoadSuccess={handlePageLoadSuccess}
+              width={props.containerWH.width}
+              scale={props.scale || 1}
+              className={isMobile ? "select-none touch-callout-none" : "-z-[1]"}
+              pageNumber={props.pageNumber}
+              renderAnnotationLayer={false}
+              renderTextLayer={false}
+              onGetAnnotationsError={(error) => {
+                console.log("annotation error", error);
+              }}
+            />
+          </Document>
+          {guideline.show && (
+            <Guidelines
+              x1={guideline.x1}
+              x2={guideline.x2}
+              y1={guideline.y1}
+              y2={guideline.y2}
+            />
+          )}
+          <DragGuidelinesLayer
+            signBtnPosition={props.signBtnPosition}
+            showGuidelines={showGuidelines}
+            posWidth={posWidth}
+            posHeight={posHeight}
+            isSignYourself={props.signerPos?.length > 0 ? true : false}
+          />
+          <WidgetsDragPreview
+            posWidth={posWidth}
+            posHeight={posHeight}
+            isSignYourself={props.signerPos?.length > 0 ? true : false}
+            uniqueId={props?.uniqueId}
+            data={props?.signerPos?.find((x) => x.Id === props?.uniqueId)}
+            isNeedSign={props?.pdfRequest}
+            pdfOriginalWH={props.pdfOriginalWH}
+            pageNumber={props.pageNumber}
+            containerWH={props.containerWH}
+            scale={props?.scale}
+          />
+          {/* Drawing rectangle overlay for Text Input widget */}
+          {isDrawing && (
+            <div
+              ref={drawingOverlayRef}
+              style={{
+                position: "absolute",
+                left: "0px",
+                top: "0px",
+                width: "0px",
+                height: "0px",
+                border: "2px dashed #007bff",
+                backgroundColor: "rgba(0, 123, 255, 0.1)",
+                pointerEvents: "none",
+                zIndex: 9999
+              }}
+            />
+          )}
+        </div>
+      </RSC>
+    </>
+  );
+}
+
+export default RenderPdf;
